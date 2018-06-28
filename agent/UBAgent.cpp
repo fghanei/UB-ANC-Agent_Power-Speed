@@ -14,8 +14,10 @@
 
 int flight_direction = 180; //0  north, 90 east
 int flight_distance = 100;
-float target_stabilize_time = 3.0; //in seconds
-float target_wait_time = 7.0; //in seconds
+float flight_speed[3] = {2.0, 5.0, 7.0};
+float target_stabilize_time = 1.0; //in seconds
+float target_wait_time = 5.0; //in seconds
+QGeoCoordinate dest[2],start_point, end_point;
 
 UBAgent::UBAgent(QObject *parent) : QObject(parent),
     m_mav(nullptr)
@@ -202,6 +204,18 @@ void UBAgent::stateTakeoff() {
             m_mav->guidedModeGotoLocation(dest);
         }
     }
+
+
+    start_point  = m_mav->coordinate();
+    end_point    = m_mav->coordinate().atDistanceAndAzimuth(flight_distance, flight_direction);
+    dest[0] = end_point;
+    dest[1] = start_point;
+
+    qInfo() << "Setting initial speed to " << flight_speed[0];
+    m_mav->sendMavCommand(m_mav->defaultComponentId(),  //fix flight speed
+                    MAV_CMD_DO_CHANGE_SPEED,
+                    true, // show error
+                    1, flight_speed[0], -1, 0, 0, 0, 0);             
 }
 
 void UBAgent::stateLand() {
@@ -246,103 +260,70 @@ void UBAgent::logInfo() {
 }
 
 void UBAgent::stateMission() {
-    static QGeoCoordinate dest;
+    static int dest_index=0;
+    static int speed_index=0;
 
     switch (m_mission_data.stage) {
 
+	// heading next destination
         case (0): {
+            //change speed or land
+            if (dest_index==2) {
+                speed_index++;
+                if (speed_index>2) {
+                    qInfo() << "Landing....";
+                    m_mission_data.stage=0;
+                    m_mission_state = STATE_LAND;
+                    m_mav->guidedModeLand();             
+                    break;
+                }
+                dest_index = 0;
+                qInfo() << "Changing speed to " << flight_speed[speed_index];
+                m_mav->sendMavCommand(m_mav->defaultComponentId(),  //fix flight speed
+                    MAV_CMD_DO_CHANGE_SPEED,
+                    true, // show error
+                    1, flight_speed[speed_index], -1, 0, 0, 0, 0);             
+            }
             m_mission_data.tick = 0;
             m_mission_data.stage++;
             qInfo() << "Turning...";
+            //fix heading towards next destination
+            float direction = m_mav->coordinate().azimuthTo(dest[dest_index]);
+            m_mav->guidedModeGotoLocation(m_mav->coordinate().atDistanceAndAzimuth(0, direction)); // 0 -> North, 90 (M_PI / 2) -> East
             m_mav->sendMavCommand(m_mav->defaultComponentId(),  //fix heading
                             MAV_CMD_CONDITION_YAW,
                             true, // show error
-                            (flight_direction)%360, 10.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+                            direction, 10.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);            
 	    break;
 	}
-        // waiting while fix heading
+        // waiting while fix heading, then move towards end_point
         case (1): {
             m_mission_data.tick++;
             if (m_mission_data.tick >= (target_wait_time * 1.0 / MISSION_TRACK_DELAY - 0.001)) {
-                qInfo() << "Heading forward, starting power measurement.";
+                if (dest_index==0) {
+                    qInfo() << "Heading forward, starting power measurement.";
+                } else {
+                    qInfo() << "Heading back, starting power measurement.";
+                }
                 m_power->sendData(UBPower::PWR_START, QByteArray());
+	        m_mav->guidedModeGotoLocation(dest[dest_index]);
                 m_mission_data.tick = 0;
                 m_mission_data.stage++;
             }
             break;
          }
-        // move
+        // waiting till reaching destination
         case (2): {
-            dest = m_mav->coordinate().atDistanceAndAzimuth(flight_distance, flight_direction); // 0 -> North, 90 (M_PI / 2) -> East
-            m_mav->guidedModeGotoLocation(dest);
-            m_mission_data.tick=0;
-            m_mission_data.stage++;
-            break;
-        }    
-        // reaching and waiting
-        case (3): {
-	    // sending information to the logger
-            
-    	    if ((m_mav->coordinate().distanceTo(dest) < POINT_ZONE) &&
-                  (abs(m_mav->coordinate().altitude() - dest.altitude()) < POINT_ZONE)) {
+            //skipping stopping at middle for straight line
+    	    if ((m_mav->coordinate().distanceTo(dest[dest_index]) < POINT_ZONE) &&
+                  (abs(m_mav->coordinate().altitude() - dest[dest_index].altitude()) < POINT_ZONE)) {
                 m_mission_data.tick++;
             }
             if (m_mission_data.tick >= (target_stabilize_time * 1.0 / MISSION_TRACK_DELAY - 0.001)) {       
-                qInfo() << "Reached target, stopping measurement";
+                qInfo() << "Reached destination, stopping measurement";
                 m_power->sendData(UBPower::PWR_STOP, QByteArray());
-                m_mission_data.tick=0;
-                m_mission_data.stage++;
-            }
-            break;
-        }
-        // landing? or skipping it? TODO 
-        case (4): {
-            m_mission_data.tick=0;
-            m_mission_data.stage++;
-            break;
-        }
-        // take off? and fix heading
-        case (5): {
-            qInfo() << "Turning...";
-            m_mav->sendMavCommand(m_mav->defaultComponentId(),
-                            MAV_CMD_CONDITION_YAW,
-                            true, // show error
-                            (180+flight_direction)%360, 10.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-            m_mission_data.stage++;
-            break;
-        }
-        // waiting while fix heading
-        case (6): {
-            m_mission_data.tick++;
-            if (m_mission_data.tick >= (target_wait_time * 1.0 / MISSION_TRACK_DELAY - 0.001)) {
-                qInfo() << "Heading back, starting power measurement.";
-                m_power->sendData(UBPower::PWR_START, QByteArray());
-                m_mission_data.stage++;
-            }
-            break;
-         }
-        // move back
-        case (7): {
-            dest = m_mav->coordinate().atDistanceAndAzimuth(flight_distance, (180+flight_direction)%360); // 0 -> North, 90 (M_PI / 2) -> East
-            m_mav->guidedModeGotoLocation(dest);
-            m_mission_data.tick=0;
-            m_mission_data.stage++;
-            break;
-        }    
-        // reaching and waiting
-        case (8): {
-	    // sending information to the logger TODO            
-    	    if ((m_mav->coordinate().distanceTo(dest) < POINT_ZONE) &&
-                  (abs(m_mav->coordinate().altitude() - dest.altitude()) < POINT_ZONE)) {
-                m_mission_data.tick++;
-            }
-            if (m_mission_data.tick >= (target_stabilize_time * 1.0 / MISSION_TRACK_DELAY - 0.001)) {       
-                qInfo() << "Reached target, stopping measurement.";
-                m_power->sendData(UBPower::PWR_STOP, QByteArray());
-                qInfo() << "Landing....";
                 m_mission_data.stage=0;
-                m_mission_state = STATE_LAND;
-                m_mav->guidedModeLand();
+                dest_index++;
             }
             break;
         }
@@ -352,5 +333,6 @@ void UBAgent::stateMission() {
 //            m_mission_data.stage++;
 //        }
     }
+    // sending information to the logger
     logInfo();
 }
