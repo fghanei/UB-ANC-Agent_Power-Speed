@@ -262,6 +262,7 @@ void UBAgent::logInfo() {
 void UBAgent::stateMission() {
     static int dest_index=0;
     static int speed_index=0;
+	static bool approx = false;
 
     switch (m_mission_data.stage) {
 
@@ -305,6 +306,7 @@ void UBAgent::stateMission() {
                 } else {
                     qInfo() << "Heading back, starting power measurement.";
                 }
+				m_power->sendData(UBPower::PWR_STOP, QByteArray()); // force stop any previous unfinished measurements.
                 m_power->sendData(UBPower::PWR_START, QByteArray());
 	        m_mav->guidedModeGotoLocation(dest[dest_index]);
                 m_mission_data.tick = 0;
@@ -315,8 +317,11 @@ void UBAgent::stateMission() {
         // waiting till reaching destination
         case (2): {
             //skipping stopping at middle for straight line
-    	    if ((m_mav->coordinate().distanceTo(dest[dest_index]) < POINT_ZONE) &&
-                  (abs(m_mav->coordinate().altitude() - dest[dest_index].altitude()) < POINT_ZONE)) {
+    	    if (m_mav->coordinate().distanceTo(dest[dest_index]) < POINT_ZONE) {
+				approx = true;
+				qInfo() << "In point approximity";
+			}
+			if (approx == true) {
                 m_mission_data.tick++;
             }
             if (m_mission_data.tick >= (target_stabilize_time * 1.0 / MISSION_TRACK_DELAY - 0.001)) {       
@@ -324,6 +329,7 @@ void UBAgent::stateMission() {
                 m_power->sendData(UBPower::PWR_STOP, QByteArray());
                 m_mission_data.stage=0;
                 dest_index++;
+				approx = false;
             }
             break;
         }
